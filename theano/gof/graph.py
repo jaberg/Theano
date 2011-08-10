@@ -313,6 +313,7 @@ class Variable(utils.object2):
         raise NotImplementedError('Subclasses of Variable must provide __ge__',
                                   self.__class__.__name__)
 
+
 class Value(Variable):
     """
     A :term:`Value` is a `Variable` with a default value.
@@ -390,8 +391,6 @@ class Constant(Value):
         return cp
 
 
-
-
 def stack_search(start, expand, mode='bfs', build_inv = False):
     """Search through a graph, either breadth- or depth-first
 
@@ -439,6 +438,27 @@ def stack_search(start, expand, mode='bfs', build_inv = False):
     return rval_list
 
 
+def ancestors(variable_list, blockers = None):
+    """Return the variables that contribute to those in variable_list (inclusive).
+
+    :type variable_list: list of `Variable` instances
+    :param variable_list:
+        output `Variable` instances from which to search backward through owners
+    :rtype: list of `Variable` instances
+    :returns:
+        all input nodes, in the order found by a left-recursive depth-first search
+        started at the nodes in `variable_list`.
+
+    """
+    def expand(r):
+        if r.owner and (not blockers or r not in blockers):
+            l = list(r.owner.inputs)
+            l.reverse()
+            return l
+    dfs_variables = stack_search(deque(variable_list), expand, 'dfs')
+    return dfs_variables
+
+
 def inputs(variable_list, blockers = None):
     """Return the inputs required to compute the given Variables.
 
@@ -451,14 +471,8 @@ def inputs(variable_list, blockers = None):
         started at the nodes in `variable_list`.
 
     """
-    def expand(r):
-        if r.owner and (not blockers or r not in blockers):
-            l = list(r.owner.inputs)
-            l.reverse()
-            return l
-    dfs_variables = stack_search(deque(variable_list), expand, 'dfs')
+    dfs_variables = ancestors(variable_list, blockers=blockers)
     rval = [r for r in dfs_variables if r.owner is None]
-    #print rval, _orig_inputs(o)
     return rval
 
 

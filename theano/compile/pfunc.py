@@ -146,6 +146,24 @@ def rebuild_collect_shared( outputs
     except:
         replace_pairs = replace
 
+    # BEGIN sorting the replace_pairs.
+    # Suppose we're replacing vars v1 and v2, but v2 appears in the ancestors of v1.
+    # In this case we have to replace v2 first, and then v1.
+    v_orig_ancestors = {}
+    v_origs_set = set([v_orig for (v_orig, v_repl) in replace_pairs])
+    for v_orig in v_origs_set:
+        #TODO: optimize by blocking on all v_origs except the current v_orig
+        anc = graph.ancestors([v_orig])  # i.e. blockers=v_origs_set/[v_orig])
+        v_orig_ancestors[v_orig] = anc
+    def v_cmp(x, y):
+        if x[0] in v_orig_ancestors[y[0]]:
+            return -1
+        if y[0] in v_orig_ancestors[x[0]]:
+            return 1
+        return 0
+    replace_pairs.sort(v_cmp)
+    # END sorting the replace_pairs
+
     for v_orig, v_repl in replace_pairs:
         if not isinstance(v_orig,Variable):
             raise TypeError('given keys must be Variable', v_orig)

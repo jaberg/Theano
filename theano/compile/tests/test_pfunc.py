@@ -608,13 +608,22 @@ class Test_pfunc(unittest.TestCase):
         assert len(f.maker.env.outputs) == 1
 
     def test_givens_replaces_shared_variable2(self):
-        a = shared(1.,'a')
-        a.default_update = a+3
-        c = a+ 10
-        f = pfunc([],c, givens = { a: a+10} )
+        a = shared(1.0 ,'a')
+        a.default_update = a + 3
+        c = a + 10
+        f = pfunc([], c, givens = {a: a + 10} )
+        theano.printing.debugprint(f)
 
-        assert f() == 21
-        assert f() == 34
+        z = f()
+        assert z == 21, z
+        z = f()
+        assert z == 34, z
+
+    def test_shared_var_in_givens_and_updates(self):
+        a = shared(1.0 ,'a')
+        self.assertRaises(ValueError, pfunc,
+                [], [], givens = {a: a + 10}, updates={a: a + 5})
+        theano.printing.debugprint(f)
 
 
 

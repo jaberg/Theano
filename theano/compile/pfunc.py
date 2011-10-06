@@ -12,14 +12,244 @@ from theano import config
 import logging
 _logger=logging.getLogger("theano.compile.pfunc")
 
-def rebuild_collect_shared( outputs
-                           , inputs             = None
-                           , replace            = None
-                           , updates            = None
-                           , rebuild_strict     = True
-                           , copy_inputs_over   = True
-                           , no_default_updates = False
-                          ):
+class NOFALLBACK: pass
+
+class MergeReplacePairs(object):
+    """
+    This class provides logic for merging together a graph specified
+    via non-independent substitutions.
+
+    The substitutions (aka givens) must be provided up-front to the constructor
+    because this class must see all the substitutions before it can merge them
+    together in the right order.
+
+
+    update_expr   - updates asked for explicitly (original graph vars)
+    update_expr_d - all update pairs in original graph, not yet cloned
+    """
+
+    def __init__(self, inputs, outputs, replace_pairs,
+            rebuild_strict = True,
+            clone_inputs = True,
+            add_default_update = lambda var: True):
+        self.clone_d = {}         # old -> new mapping for merged output graph
+        self.shared_inputs = []   # discovered shared variables
+        self.update_expr = []     # update expressions of shared vars (items)
+        self.update_expr_d = {}   # update expressions of shared vars (dict)
+        self.orig_inputs = inputs
+        self.orig_outputs = outputs
+        self.replace_pairs = replace_pairs
+        self.clone_inputs = clone_inputs
+        self.rebuild_strict = rebuild_strict
+        self.add_default_update = add_default_update
+
+    def merge_givens(self):
+        """
+        Merge replace_pairs with the input->output graph (with updates)
+
+        stores result as self.built_inputs, self.built_outputs, self.clone_d
+        """
+        self.sort_replace_pairs()
+        for old, new in self.replace_pairs:
+            newclone = self.clone_v_get_shared_updates(new)
+            self.set_newest(old, newclone)
+
+    def merge_inputs(self):
+        for i in self.orig_inputs:
+            if not self.clone_inputs:
+                self.clone_d.setdefault(i, i.clone())
+            else:
+                self.clone_d.setdefault(i, i)
+        self.built_inputs = [self.get_newest(o) for o in self.orig_inputs]
+
+    def merge_outputs(self):
+        for output in self.orig_outputs:
+            newclone = self.clone_v_get_shared_updates(output)
+            self.set_newest(output, newclone)
+        self.built_outputs = [self.get_newest(o) for o in self.orig_outputs]
+
+    def merge_update_expressions(self):
+        # Iterate over update_expr, cloning its elements, and updating
+        # shared_inputs, update_d and update_expr from the SharedVariables
+        # we discover.
+        # If the variable to be updated is a shared variable not already
+        # in shared_inputs, add it.
+        i = 0
+        # N.B. clone can append to update_expr, hence the use of `i`
+        while i < len(self.update_expr):
+            v, v_update = self.update_expr[i]
+            print 'MERGING update', type(v), v_update, id(v)
+            self.clone_v_get_shared_updates(v)
+            i += 1
+
+    def get_newest(self, key, fallback=NOFALLBACK):
+        try:
+            rval = self.clone_d[key]
+        except KeyError:
+            if fallback is NOFALLBACK:
+                raise
+            return fallback
+        if rval != key:
+            try:
+                rval = self.get_newest(rval)
+                self.clone_d[key] = rval
+            except KeyError:
+                pass
+        return rval
+
+    def set_newest(self, old, new):
+        if old in self.clone_d:
+            val = self.clone_d[old]
+            if val is not old:
+                self.set_newest(val, new)
+            self.clone_d[old] = new
+        else:
+            self.clone_d[old] = new
+
+    def has_update(self, key):
+        return key in self.update_expr_d
+
+    def get_update(self, key):
+        return self.update_expr_d[key]
+
+    def get_newest_update(self, key):
+        return self.get_newest(self.update_expr_d[key])
+
+    def mark_shared_input_with_update(self, v, update):
+        if v in self.update_expr_d:
+            if self.update_expr_d[v] is not update:
+                raise KeyError('multiple updates for shared variable', v)
+        self.update_expr_d[v] = update
+        self.update_expr.append((v, update))
+
+    def add_shared_input(self, v, add_default_update=None):
+        if not isinstance(v, SharedVariable):
+            raise TypeError(v)
+
+        if v in self.shared_inputs:
+            print 'EARLY RETURN'
+            return
+
+        print 'ADDING SHARED', v, id(v)
+
+        self.shared_inputs.append(v)
+
+        if self.clone_inputs:
+            self.clone_d.setdefault(v, v.clone())
+        else:
+            self.clone_d.setdefault(v, v)
+
+        print self.update_expr_d
+
+        orig_update_expr = None
+        try:
+            orig_update_expr = self.update_expr_d[v]
+        except KeyError:
+            print 'KEYERROR'
+            if add_default_update is None:
+                add_default_update = self.add_default_update(v)
+            if (add_default_update
+                    and hasattr(v, 'default_update')
+                    and not self.has_update(v)):
+                orig_update_expr = v.default_update
+                if orig_update_expr is not None:
+                    self.update_expr.append((v, orig_update_expr))
+        print 'UPDATE', orig_update_expr
+
+        if orig_update_expr is None:
+            self.clone_v_get_shared_updates(orig_update_expr)
+        else:
+            v_update = v.filter_update(self.get_newest(orig_update_expr,
+                orig_update_expr))
+            if v_update.type != v.type:
+                raise TypeError(
+                    ('an update must have the same type as '
+                      'the original shared variable'  ),
+                    (v, v.type, v_update, v_update.type))
+                self.set_newest(orig_update_expr,
+                    self.clone_v_get_shared_updates(v_update))
+
+    def sort_replace_pairs(self):
+        """
+        Return a list of (oldvar, newvar) pairs in dependency order.
+
+        returns: a list of [(old0, new0), (old1, new1), ...] pairs such that
+        if A < B, then newA's does not depend on oldB.
+
+        The purpose of this function is to support a sensible interpretation of
+        givens when the various subgraphs they represent are tangled up and
+        co-dependent.
+
+        """
+        # Suppose we're replacing vars v1 and v2, but v2 appears in the ancestors of v1.
+        # In this case we have to replace v2 first, and then v1.
+        v_orig_ancestors = {}
+        v_origs_set = set([v_orig for (v_orig, v_repl) in self.replace_pairs])
+        for v_orig in v_origs_set:
+            anc = graph.ancestors([v_orig],
+                    blockers=set(self.orig_inputs
+                        + [v for v in v_origs_set if v is not v_orig]))
+            v_orig_ancestors[v_orig] = set(anc)
+        def v_cmp(x, y):
+            if x[0] in v_orig_ancestors[y[0]]:
+                return -1
+            if y[0] in v_orig_ancestors[x[0]]:
+                return 1
+            return 0
+        self.replace_pairs.sort(v_cmp)
+
+    def clone_v_get_shared_updates(self, v):
+        '''
+        Clones a variable and its inputs recursively until all are in
+        clone_d. Also appends all shared variables met along the way to
+        shared inputs, and their default_update (if applicable) to update_d
+        and update_expr.
+
+        v can have an env attached to it, case in which we want to clone
+        constants ( to avoid having a constant belonging to two envs)
+
+        This function is co-recursive with self.clone_a(), for apply nodes
+        '''
+        assert v is not None
+        if v not in self.clone_d:
+            if v.owner:
+                self.clone_a(v.owner) # inserts inputs and outputs into clone_d
+            elif isinstance(v, SharedVariable):
+                self.add_shared_input(v)
+            elif isinstance(v, Constant) and hasattr(v,'env'):
+                # N.B. cloning constants does not copy the underlying object
+                self.clone_d.setdefault(v, v.clone())
+            elif self.clone_inputs:
+                self.clone_d.setdefault(v, v.clone())
+            else:
+                self.clone_d[v] = v
+        return self.clone_d[v]
+
+    def clone_a(self, a):
+        '''
+        Clones a variable and its inputs recursively until all are in
+        clone_d. It occures with clone_v_get_shared_updates
+        '''
+        if a is None:
+            return None
+        if a not in self.clone_d:
+            for i in a.inputs:
+                self.clone_v_get_shared_updates(i)
+            self.clone_d[a] = a.clone_with_new_inputs(
+                    [self.clone_d[i] for i in a.inputs],
+                    strict = self.rebuild_strict)
+            for old_o, new_o in zip(a.outputs, self.clone_d[a].outputs):
+                self.clone_d.setdefault(old_o, new_o)
+        return self.clone_d[a]
+
+
+def rebuild_collect_shared(outputs,
+        inputs             = None,
+        replace            = None,
+        updates            = None,
+        rebuild_strict     = True,
+        copy_inputs_over   = True,
+        no_default_updates = False):
     """
     Function that allows replacing subgraphs of a computational
     graph.
@@ -60,219 +290,108 @@ def rebuild_collect_shared( outputs
 
     """
 
+    # inputs preparation
+    if inputs is None:
+        inputs = []
+
+    # outputs preparation
     if isinstance(outputs,tuple):
         outputs = list(outputs)
 
-    ## This function implements similar functionality as graph.clone
-    ## and it should be merged with that
-    clone_d = {}
-    update_d = {}
-    update_expr = []
-    # list of shared inputs that are used as inputs of the graph
-    shared_inputs = []
-
-
-    def clone_v_get_shared_updates(v, copy_inputs_over):
-        '''
-        Clones a variable and its inputs recursively until all are in
-        clone_d. Also appends all shared variables met along the way to
-        shared inputs, and their default_update (if applicable) to update_d
-        and update_expr.
-
-        v can have an env attached to it, case in which we want to clone
-        constants ( to avoid having a constant belonging to two envs)
-        '''
-        # this co-recurses with clone_a
-        assert v is not None
-        if v in clone_d:
-            return clone_d[v]
-        if v.owner:
-            clone_a(v.owner, copy_inputs_over)
-            return clone_d.setdefault(v,v)
-        elif isinstance(v, SharedVariable):
-            if v not in shared_inputs:
-                shared_inputs.append(v)
-            if hasattr(v, 'default_update'):
-                # Check that v should not be excluded from the default
-                # updates list
-                if    ( no_default_updates is False or
-                        ( isinstance(no_default_updates, list) and
-                          v not in no_default_updates
-                        )
-                      ):
-                    # Do not use default_update if a "real" update was
-                    # provided
-                    if v not in update_d:
-                        v_update = v.filter_update(v.default_update)
-                        if v_update.type != v.type:
-                            raise TypeError(
-                                ( 'an update must have the same type as '
-                                  'the original shared variable'  )
-                                , (v, v.type, v_update, v_update.type))
-                        update_d[v] = v_update
-                        update_expr.append((v, v_update))
-        if not copy_inputs_over or (isinstance(v, Constant) and
-                                    hasattr(v,'env')):
-            ### Cloning shared variables implies copying their underlying
-            ### memory buffer ?? No.
-            return clone_d.setdefault(v,v.clone())
-        else:
-            return clone_d.setdefault(v,v)
-
-    def clone_a(a, copy_inputs_over):
-        '''
-        Clones a variable and its inputs recursively until all are in
-        clone_d. It occures with clone_v_get_shared_updates
-        '''
-        if a is None:
-            return None
-        if a not in clone_d:
-            for i in a.inputs:
-                clone_v_get_shared_updates(i, copy_inputs_over)
-
-            clone_d[a] = a.clone_with_new_inputs([clone_d[i] for i in
-                                                  a.inputs],
-                                                 strict = rebuild_strict)
-            for old_o, new_o in zip(a.outputs, clone_d[a].outputs):
-                clone_d.setdefault(old_o,new_o)
-        return clone_d[a]
-
-
-    # intialize the clone_d mapping with the replace dictionary
+    # replace preparation
     if replace is None:
         replace = []
+
     try:
         replace_pairs = replace.items()
     except Exception:
         replace_pairs = replace
 
-    # BEGIN sorting the replace_pairs.
-    # Suppose we're replacing vars v1 and v2, but v2 appears in the ancestors of v1.
-    # In this case we have to replace v2 first, and then v1.
-    v_orig_ancestors = {}
-    v_origs_set = set([v_orig for (v_orig, v_repl) in replace_pairs])
-    for v_orig in v_origs_set:
-        #TODO: optimize by blocking on all v_origs except the current v_orig
-        anc = graph.ancestors([v_orig])  # i.e. blockers=v_origs_set/[v_orig])
-        v_orig_ancestors[v_orig] = anc
-    def v_cmp(x, y):
-        if x[0] in v_orig_ancestors[y[0]]:
-            return -1
-        if y[0] in v_orig_ancestors[x[0]]:
-            return 1
-        return 0
-    replace_pairs.sort(v_cmp)
-    # END sorting the replace_pairs
-
-    for v_orig, v_repl in replace_pairs:
-        if not isinstance(v_orig,Variable):
+    for i, (v_orig, v_repl) in enumerate(replace_pairs):
+        if not isinstance(v_orig, Variable):
             raise TypeError('given keys must be Variable', v_orig)
-        if not isinstance(v_repl,Variable):
-            v_repl = shared(v_repl)
-        assert v_orig not in clone_d
-        clone_d[v_orig] = clone_v_get_shared_updates(v_repl,
-                                                     copy_inputs_over)
+        if not isinstance(v_repl, Variable):
+            replace_pairs[i] = (v_orig, shared(v_repl))
 
-    if inputs is None:
-        inputs = []
-
-    def clone_inputs(i):
-        if not copy_inputs_over:
-            return clone_d.setdefault(i,i.clone())
-        else:
-            return clone_d.setdefault(i,i)
-
-    input_variables = [clone_inputs(i) for i in inputs]
-
-    # It was decided, as a first step, to prevent shared variables from
+    # It was decided to disallow shared variables from
     # being used as function inputs. Although it is technically possible,
     # it is also not clear when/how to use the value of that shared
     # variable (is it a default? ignored?, if the shared variable changes,
     # does that function default also change?).
-    if numpy.any([isinstance(v, SharedVariable) for v in input_variables]):
+    if numpy.any([isinstance(v, SharedVariable) for v in inputs]):
         raise TypeError(('Cannot use a shared variable (%s) as explicit '
                          'input. Consider substituting a non-shared'
                          ' variable via the `givens` parameter') % v)
 
+    def var_from_output(v):
+        if isinstance(v, Variable):
+            return v
+        elif isinstance(v, Out):
+            return v.variable
+        else:
+            raise TypeError(
+                    'outputs must be theano Variable or Out instances', v)
+
+    if isinstance(outputs, list):
+        output_vars = [var_from_output(o) for o in outputs]
+    elif outputs == None:
+        output_vars = []
+    else:
+        output_vars = [var_from_output(outputs)]
+
+    def add_default_update(v):
+        try:
+            return v not in no_default_updates
+        except TypeError:
+            return not no_default_updates
+
+    # merge replace dict with inputs and outputs
+    MRP = MergeReplacePairs(inputs, output_vars, replace_pairs,
+            clone_inputs = copy_inputs_over,
+            add_default_update = add_default_update)
+
     # Fill update_d and update_expr with provided updates
     if updates is None:
         updates = []
-    for (store_into, update_val) in iter_over_pairs(updates):
-        if not isinstance(store_into, SharedVariable):
-            raise TypeError('update target must be a SharedVariable'
-                            , store_into)
-        if store_into in update_d:
-            raise ValueError(('this shared variable already has an update '
-                              'expression'),
-                              (store_into, update_d[store_into]))
 
-        update_val = store_into.filter_update(update_val)
-                                        # typically this might be a cast()
-        if update_val.type != store_into.type:
-            err_msg  = ( 'an update must have the same type as the '
-                        'original shared variable(dest, dest.type, '
-                        'update_val, update_val.type)')
-            err_arg = ( store_into
-                       , store_into.type
-                       , update_val
-                       , update_val.type)
+    for (shared_var, update_val) in iter_over_pairs(updates):
+        if not isinstance(shared_var, SharedVariable):
+            raise TypeError('update target must be a SharedVariable',
+                    shared_var)
+        if shared_var in [old for (old, new) in replace_pairs]:
+            raise ValueError('Using a shared variable in both updates and givens'
+                    ' is ambiguous. Use the replacement in the updates dict'
+                    ' if that is what you mean.',
+                    shared_var)
+        if not isinstance(update_val, Variable):
+            update_val = shared(update_val)
+        print 'shared_var', id(shared_var)
+        MRP.mark_shared_input_with_update(shared_var, update_val)
 
-            raise TypeError(err_msg, err_arg )
-        update_d[store_into] = update_val
-        update_expr.append((store_into, update_val))
+    MRP.merge_givens()
+    MRP.merge_inputs()
+    MRP.merge_outputs()
+    MRP.merge_update_expressions()
 
     # Elements of "outputs" are here cloned to "cloned_outputs"
-    if isinstance(outputs, list):
-        cloned_outputs = []
-        for v in outputs:
-            if isinstance(v, Variable):
-                cloned_v = clone_v_get_shared_updates(v, copy_inputs_over)
-                cloned_outputs.append(cloned_v)
-            elif isinstance(v, Out):
-                cloned_v = clone_v_get_shared_updates(v.variable,
-                                                      copy_inputs_over)
-                cloned_outputs.append(Out(cloned_v, borrow=v.borrow))
-            else:
-                raise TypeError( ( 'outputs must be theano Variable or '
-                                  'Out instances'), v)
-            #computed_list.append(cloned_v)
-    else:
-        if isinstance(outputs, Variable):
-            cloned_v = clone_v_get_shared_updates(outputs, copy_inputs_over)
-            cloned_outputs = cloned_v
-            #computed_list.append(cloned_v)
-        elif isinstance(outputs, Out):
-            cloned_v = clone_v_get_shared_updates(outputs.variable,
-                                                  copy_inputs_over)
-            cloned_outputs = Out(cloned_v, borrow=outputs.borrow)
-            #computed_list.append(cloned_v)
-        elif outputs is None:
-            cloned_outputs = [] # TODO: get Function.__call__ to return None
+    def out_from_cloned_v(cloned_v, v):
+        if isinstance(v, Variable):
+            return cloned_v
+        elif isinstance(v, Out):
+            return Out(cloned_v, borrow=v.borrow)
+        elif v == None:
+            return []
         else:
-            raise TypeError( ('output must be a theano Variable or Out '
-                              'instance (or list of them)')
-                            , outputs)
+            assert 0, "This should have been caught above"
 
+    if isinstance(outputs, list):
+        cloned_outputs = [out_from_cloned_v(cloned_v, out)
+                for cloned_v, out in zip(MRP.built_outputs, outputs)]
+    else:
+        cloned_outputs = out_from_cloned_v(MRP.built_outputs[0], outputs)
 
-    # Iterate over update_expr, cloning its elements, and updating
-    # shared_inputs, update_d and update_expr from the SharedVariables
-    # we discover.
-    # If the variable to be updated is a shared variable not already
-    # in shared_inputs, add it.
-    # Note: we extend update_expr while iterating over it.
+    return (MRP.built_inputs, cloned_outputs, MRP)
 
-    i = 0
-    while i<len(update_expr):
-        v, v_update = update_expr[i]
-        cloned_v_update = clone_v_get_shared_updates(v_update,
-                                                     copy_inputs_over)
-        update_d[v] = cloned_v_update
-        if isinstance(v, SharedVariable) and v not in shared_inputs:
-            shared_inputs.append(v)
-        i += 1
-
-    return ( input_variables, cloned_outputs
-            , [clone_d, update_d, update_expr, shared_inputs] )
 
 class Param(object):
     def __init__(self, variable, default=None, name=None, mutable=False,
@@ -325,6 +444,7 @@ class Param(object):
         self.allow_downcast = allow_downcast
         self.implicit = implicit
         self.borrow = borrow
+
 
 def pfunc(params, outputs=None, mode=None, updates=[], givens=[],
         no_default_updates=False, accept_inplace=False, name=None,
@@ -429,28 +549,29 @@ def pfunc(params, outputs=None, mode=None, updates=[], givens=[],
               for p in params]
 
     in_variables = [ input.variable for input in inputs ]
-    output_vars = rebuild_collect_shared(
-                              outputs
-                            , in_variables
-                            , replace            = givens
-                            , updates            = updates
-                            , rebuild_strict     = True
-                            , copy_inputs_over   = True
-                            , no_default_updates = no_default_updates )
-    # extracting the arguments
-    input_variables, cloned_outputs, other_stuff = output_vars
-    clone_d, update_d, update_expr, shared_inputs = other_stuff
+    input_variables, cloned_outputs, MRP = rebuild_collect_shared(outputs,
+                            in_variables,
+                            replace = givens,
+                            updates = updates,
+                            rebuild_strict = True,
+                            copy_inputs_over = True,
+                            no_default_updates = no_default_updates )
 
     for i, iv in zip(inputs, input_variables):
         i.variable = iv
 
-    for sv in shared_inputs:
-        if sv in update_d:
-            si = In(variable=sv, value=sv.container, mutable=True,
-                    borrow=True, update=update_d[sv])
+    for sv in MRP.shared_inputs:
+        if MRP.has_update(sv):
+            si = In(variable=MRP.get_newest(sv),
+                    value=sv.container,
+                    mutable=True,
+                    borrow=True,
+                    update=MRP.get_newest_update(sv))
         else:
-            si = In(variable=sv, value=sv.container,
-                    mutable=False, borrow=True)
+            si = In(variable=MRP.get_newest(sv),
+                    value=sv.container,
+                    mutable=False,
+                    borrow=True)
         inputs.append(si)
 
     return orig_function(inputs, cloned_outputs, mode,

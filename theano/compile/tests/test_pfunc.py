@@ -612,7 +612,10 @@ class Test_pfunc(unittest.TestCase):
         a.default_update = a + 3
         c = a + 10
         f = pfunc([], c, givens = {a: a + 10} )
-        theano.printing.debugprint(f)
+        #print 'TEST:F'
+        #theano.printing.debugprint(f)
+        #print 'ENV'
+        #theano.printing.debugprint(env.outputs)
 
         z = f()
         assert z == 21, z
@@ -623,7 +626,6 @@ class Test_pfunc(unittest.TestCase):
         a = shared(1.0 ,'a')
         self.assertRaises(ValueError, pfunc,
                 [], [], givens = {a: a + 10}, updates={a: a + 5})
-        theano.printing.debugprint(f)
 
 
 

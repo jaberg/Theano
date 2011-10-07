@@ -8,6 +8,7 @@ from theano.gof import Container, Variable, generic, graph, Constant, Value
 from theano.compile import orig_function, In, Out
 from theano.compile.sharedvalue import SharedVariable, shared
 from theano import config
+from theano import printing
 
 import logging
 _logger=logging.getLogger("theano.compile.pfunc")
@@ -24,14 +25,18 @@ class MergeClone(object):
     because this class must see all the substitutions before it can merge them
     together in the right order.
 
+    clone_inputs - should generally be True, unless you know what you're doing
+                It is possible to create cyclic replacement graphs if this is
+                False
+
     """
 
     def __init__(self, inputs, outputs, replace_pairs, updates,
             rebuild_strict = True,
             clone_inputs = True,
             add_default_update = lambda var: True):
-        self.clone_d = {}         # old -> new mapping for merged output graph
-        self.shared_inputs = []   # cloned shared variables in discovery order
+        self._clone_d = {}         # old -> new mapping for merged output graph
+        self.shared_inputs = []    # cloned shared variables in discovery order
         self.orig_inputs = inputs
         self.orig_outputs = outputs
         self.replace_pairs = replace_pairs
@@ -53,7 +58,7 @@ class MergeClone(object):
         """
         Merge replace_pairs with the input->output graph (with updates)
 
-        stores result as self.built_inputs, self.built_outputs, self.clone_d
+        stores result as self.built_inputs, self.built_outputs, self._clone_d
         """
         self.sort_replace_pairs()
         for old, new in self.replace_pairs:
@@ -62,10 +67,15 @@ class MergeClone(object):
 
     def merge_inputs(self):
         for i in self.orig_inputs:
+            if i in [old for (old, new) in self.replace_pairs]:
+                raise ValueError('using givens to replace an input'
+                        ' is ambiguous. Use the replacement in the'
+                        ' inputs list if that is what you mean.',
+                        shared_var)
             if not self.clone_inputs:
-                self.clone_d.setdefault(i, i.clone())
+                self._clone_d.setdefault(i, i.clone())
             else:
-                self.clone_d.setdefault(i, i)
+                self._clone_d.setdefault(i, i)
         self.built_inputs = [self.get_newest(o) for o in self.orig_inputs]
 
     def merge_outputs(self):
@@ -98,7 +108,7 @@ class MergeClone(object):
 
     def get_newest(self, key, fallback=NoDefault):
         try:
-            rval = self.clone_d[key]
+            rval = self._clone_d[key]
         except KeyError:
             if fallback is NoDefault:
                 raise
@@ -106,19 +116,19 @@ class MergeClone(object):
         if rval != key:
             try:
                 rval = self.get_newest(rval)
-                self.clone_d[key] = rval
+                self._clone_d[key] = rval
             except KeyError:
                 pass
         return rval
 
     def set_newest(self, old, new):
-        if old in self.clone_d:
-            val = self.clone_d[old]
+        if old in self._clone_d:
+            val = self._clone_d[old]
             if val is not old:
                 self.set_newest(val, new)
-            self.clone_d[old] = new
+            self._clone_d[old] = new
         else:
-            self.clone_d[old] = new
+            self._clone_d[old] = new
 
     def has_update(self, key):
         return key in self.updates_d
@@ -133,14 +143,14 @@ class MergeClone(object):
         if not isinstance(v, SharedVariable):
             raise TypeError(v)
 
-        if v in self.clone_d:
-            return self.clone_d[v]
+        if v in self._clone_d:
+            return self.get_newest(v)
 
         if self.clone_inputs:
-            self.clone_d[v] = v.clone()
+            self._clone_d[v] = v.clone()
         else:
-            self.clone_d[v] = v
-        self.shared_inputs.append(v)
+            self._clone_d[v] = v
+        self.shared_inputs.append((v, self._clone_d[v]))
 
         if v not in self.updates_d:
             if (self.add_default_update(v)
@@ -182,7 +192,7 @@ class MergeClone(object):
     def clone_v_get_shared_updates(self, v):
         '''
         Clones a variable and its inputs recursively until all are in
-        clone_d. Also appends all shared variables met along the way to
+        _clone_d. Also appends all shared variables met along the way to
         shared inputs, and their default_update (if applicable) to update_d
         and update_expr.
 
@@ -192,19 +202,19 @@ class MergeClone(object):
         This function is co-recursive with self.clone_a(), for apply nodes
         '''
         assert v is not None
-        if v not in self.clone_d:
+        if v not in self._clone_d:
             if v.owner:
                 self.clone_a(v.owner) # inserts inputs and outputs into clone_d
             elif isinstance(v, SharedVariable):
                 self.clone_shared_input(v)
             elif isinstance(v, Constant) and hasattr(v,'env'):
                 # N.B. cloning constants does not copy the underlying object
-                self.clone_d[v] = v.clone()
+                self._clone_d[v] = v.clone()
             elif self.clone_inputs:
-                self.clone_d[v] = v.clone()
+                self._clone_d[v] = v.clone()
             else:
-                self.clone_d[v] = v
-        return self.clone_d[v]
+                self._clone_d[v] = v
+        return self.get_newest(v)
 
     def clone_a(self, a):
         '''
@@ -213,15 +223,15 @@ class MergeClone(object):
         '''
         if a is None:
             return None
-        if a not in self.clone_d:
+        if a not in self._clone_d:
             for i in a.inputs:
                 self.clone_v_get_shared_updates(i)
-            self.clone_d[a] = a.clone_with_new_inputs(
-                    [self.clone_d[i] for i in a.inputs],
+            self._clone_d[a] = a.clone_with_new_inputs(
+                    [self.get_newest(i) for i in a.inputs],
                     strict = self.rebuild_strict)
-            for old_o, new_o in zip(a.outputs, self.clone_d[a].outputs):
-                self.clone_d.setdefault(old_o, new_o)
-        return self.clone_d[a]
+            for old_o, new_o in zip(a.outputs, self._clone_d[a].outputs):
+                self._clone_d.setdefault(old_o, new_o)
+        return self.get_newest(a)
 
 
 def rebuild_collect_shared(outputs,
@@ -541,15 +551,15 @@ def pfunc(params, outputs=None, mode=None, updates=[], givens=[],
     for i, iv in zip(inputs, input_variables):
         i.variable = iv
 
-    for sv in MC.shared_inputs:
+    for sv, cv in MC.shared_inputs:
         if MC.has_update(sv):
-            si = In(variable=MC.get_newest(sv),
+            si = In(variable=cv,
                     value=sv.container,
                     mutable=True,
                     borrow=True,
                     update=MC.get_newest_update(sv))
         else:
-            si = In(variable=MC.get_newest(sv),
+            si = In(variable=cv,
                     value=sv.container,
                     mutable=False,
                     borrow=True)

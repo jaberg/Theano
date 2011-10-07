@@ -12,9 +12,10 @@ from theano import config
 import logging
 _logger=logging.getLogger("theano.compile.pfunc")
 
-class NOFALLBACK: pass
+class NoDefault:
+    "Singleton object used by get() to indicate no default has been provided."
 
-class MergeReplacePairs(object):
+class MergeClone(object):
     """
     This class provides logic for merging together a graph specified
     via non-independent substitutions.
@@ -23,25 +24,30 @@ class MergeReplacePairs(object):
     because this class must see all the substitutions before it can merge them
     together in the right order.
 
-
-    update_expr   - updates asked for explicitly (original graph vars)
-    update_expr_d - all update pairs in original graph, not yet cloned
     """
 
-    def __init__(self, inputs, outputs, replace_pairs,
+    def __init__(self, inputs, outputs, replace_pairs, updates,
             rebuild_strict = True,
             clone_inputs = True,
             add_default_update = lambda var: True):
         self.clone_d = {}         # old -> new mapping for merged output graph
-        self.shared_inputs = []   # discovered shared variables
-        self.update_expr = []     # update expressions of shared vars (items)
-        self.update_expr_d = {}   # update expressions of shared vars (dict)
+        self.shared_inputs = []   # cloned shared variables in discovery order
         self.orig_inputs = inputs
         self.orig_outputs = outputs
         self.replace_pairs = replace_pairs
+        self.updates = list(updates)
+        self.updates_d = dict(updates)
+        if len(self.updates) != len(self.updates_d):
+            raise TypeError('duplicate shared var in updates list')
         self.clone_inputs = clone_inputs
         self.rebuild_strict = rebuild_strict
         self.add_default_update = add_default_update
+
+    def merge_all(self):
+        self.merge_givens()
+        self.merge_inputs()
+        self.merge_outputs()
+        self.merge_update_expressions()
 
     def merge_givens(self):
         """
@@ -76,17 +82,25 @@ class MergeReplacePairs(object):
         # in shared_inputs, add it.
         i = 0
         # N.B. clone can append to update_expr, hence the use of `i`
-        while i < len(self.update_expr):
-            v, v_update = self.update_expr[i]
-            print 'MERGING update', type(v), v_update, id(v)
+        while i < len(self.updates):
+            v, v_update = self.updates[i]
             self.clone_v_get_shared_updates(v)
+            v_update = v.filter_update(
+                    self.get_newest(v_update, v_update))
+            if v_update.type != v.type:
+                raise TypeError(
+                    ('an update must have the same type as '
+                      'the original shared variable'  ),
+                    (v, v.type, v_update, v_update.type))
+            newclone = self.clone_v_get_shared_updates(v_update)
+            self.set_newest(v_update, newclone)
             i += 1
 
-    def get_newest(self, key, fallback=NOFALLBACK):
+    def get_newest(self, key, fallback=NoDefault):
         try:
             rval = self.clone_d[key]
         except KeyError:
-            if fallback is NOFALLBACK:
+            if fallback is NoDefault:
                 raise
             return fallback
         if rval != key:
@@ -107,67 +121,34 @@ class MergeReplacePairs(object):
             self.clone_d[old] = new
 
     def has_update(self, key):
-        return key in self.update_expr_d
+        return key in self.updates_d
 
     def get_update(self, key):
-        return self.update_expr_d[key]
+        return self.updates_d[key]
 
     def get_newest_update(self, key):
-        return self.get_newest(self.update_expr_d[key])
+        return self.get_newest(self.updates_d[key])
 
-    def mark_shared_input_with_update(self, v, update):
-        if v in self.update_expr_d:
-            if self.update_expr_d[v] is not update:
-                raise KeyError('multiple updates for shared variable', v)
-        self.update_expr_d[v] = update
-        self.update_expr.append((v, update))
-
-    def add_shared_input(self, v, add_default_update=None):
+    def clone_shared_input(self, v):
         if not isinstance(v, SharedVariable):
             raise TypeError(v)
 
-        if v in self.shared_inputs:
-            print 'EARLY RETURN'
-            return
-
-        print 'ADDING SHARED', v, id(v)
-
-        self.shared_inputs.append(v)
+        if v in self.clone_d:
+            return self.clone_d[v]
 
         if self.clone_inputs:
-            self.clone_d.setdefault(v, v.clone())
+            self.clone_d[v] = v.clone()
         else:
-            self.clone_d.setdefault(v, v)
+            self.clone_d[v] = v
+        self.shared_inputs.append(v)
 
-        print self.update_expr_d
-
-        orig_update_expr = None
-        try:
-            orig_update_expr = self.update_expr_d[v]
-        except KeyError:
-            print 'KEYERROR'
-            if add_default_update is None:
-                add_default_update = self.add_default_update(v)
-            if (add_default_update
-                    and hasattr(v, 'default_update')
-                    and not self.has_update(v)):
+        if v not in self.updates_d:
+            if (self.add_default_update(v)
+                    and hasattr(v, 'default_update')):
                 orig_update_expr = v.default_update
                 if orig_update_expr is not None:
-                    self.update_expr.append((v, orig_update_expr))
-        print 'UPDATE', orig_update_expr
-
-        if orig_update_expr is None:
-            self.clone_v_get_shared_updates(orig_update_expr)
-        else:
-            v_update = v.filter_update(self.get_newest(orig_update_expr,
-                orig_update_expr))
-            if v_update.type != v.type:
-                raise TypeError(
-                    ('an update must have the same type as '
-                      'the original shared variable'  ),
-                    (v, v.type, v_update, v_update.type))
-                self.set_newest(orig_update_expr,
-                    self.clone_v_get_shared_updates(v_update))
+                    self.updates_d[v] = orig_update_expr
+                    self.updates.append((v, orig_update_expr))
 
     def sort_replace_pairs(self):
         """
@@ -215,12 +196,12 @@ class MergeReplacePairs(object):
             if v.owner:
                 self.clone_a(v.owner) # inserts inputs and outputs into clone_d
             elif isinstance(v, SharedVariable):
-                self.add_shared_input(v)
+                self.clone_shared_input(v)
             elif isinstance(v, Constant) and hasattr(v,'env'):
                 # N.B. cloning constants does not copy the underlying object
-                self.clone_d.setdefault(v, v.clone())
+                self.clone_d[v] = v.clone()
             elif self.clone_inputs:
-                self.clone_d.setdefault(v, v.clone())
+                self.clone_d[v] = v.clone()
             else:
                 self.clone_d[v] = v
         return self.clone_d[v]
@@ -339,21 +320,11 @@ def rebuild_collect_shared(outputs,
     else:
         output_vars = [var_from_output(outputs)]
 
-    def add_default_update(v):
-        try:
-            return v not in no_default_updates
-        except TypeError:
-            return not no_default_updates
-
-    # merge replace dict with inputs and outputs
-    MRP = MergeReplacePairs(inputs, output_vars, replace_pairs,
-            clone_inputs = copy_inputs_over,
-            add_default_update = add_default_update)
-
     # Fill update_d and update_expr with provided updates
     if updates is None:
         updates = []
 
+    updates_vars = []
     for (shared_var, update_val) in iter_over_pairs(updates):
         if not isinstance(shared_var, SharedVariable):
             raise TypeError('update target must be a SharedVariable',
@@ -365,13 +336,23 @@ def rebuild_collect_shared(outputs,
                     shared_var)
         if not isinstance(update_val, Variable):
             update_val = shared(update_val)
-        print 'shared_var', id(shared_var)
-        MRP.mark_shared_input_with_update(shared_var, update_val)
 
-    MRP.merge_givens()
-    MRP.merge_inputs()
-    MRP.merge_outputs()
-    MRP.merge_update_expressions()
+        if shared_var in [sv for (sv, val) in updates_vars]:
+            raise ValueError('duplicate shared variable update', sv)
+        updates_vars.append((shared_var, update_val))
+
+    def add_default_update(v):
+        try:
+            return v not in no_default_updates
+        except TypeError:
+            return not no_default_updates
+        
+    # merge replace dict with inputs and outputs
+    MC = MergeClone(inputs, output_vars, replace_pairs, updates_vars,
+            clone_inputs=copy_inputs_over,
+            add_default_update=add_default_update)
+
+    MC.merge_all()
 
     # Elements of "outputs" are here cloned to "cloned_outputs"
     def out_from_cloned_v(cloned_v, v):
@@ -386,11 +367,11 @@ def rebuild_collect_shared(outputs,
 
     if isinstance(outputs, list):
         cloned_outputs = [out_from_cloned_v(cloned_v, out)
-                for cloned_v, out in zip(MRP.built_outputs, outputs)]
+                for cloned_v, out in zip(MC.built_outputs, outputs)]
     else:
-        cloned_outputs = out_from_cloned_v(MRP.built_outputs[0], outputs)
+        cloned_outputs = out_from_cloned_v(MC.built_outputs[0], outputs)
 
-    return (MRP.built_inputs, cloned_outputs, MRP)
+    return (MC.built_inputs, cloned_outputs, MC)
 
 
 class Param(object):
@@ -549,7 +530,7 @@ def pfunc(params, outputs=None, mode=None, updates=[], givens=[],
               for p in params]
 
     in_variables = [ input.variable for input in inputs ]
-    input_variables, cloned_outputs, MRP = rebuild_collect_shared(outputs,
+    input_variables, cloned_outputs, MC = rebuild_collect_shared(outputs,
                             in_variables,
                             replace = givens,
                             updates = updates,
@@ -560,15 +541,15 @@ def pfunc(params, outputs=None, mode=None, updates=[], givens=[],
     for i, iv in zip(inputs, input_variables):
         i.variable = iv
 
-    for sv in MRP.shared_inputs:
-        if MRP.has_update(sv):
-            si = In(variable=MRP.get_newest(sv),
+    for sv in MC.shared_inputs:
+        if MC.has_update(sv):
+            si = In(variable=MC.get_newest(sv),
                     value=sv.container,
                     mutable=True,
                     borrow=True,
-                    update=MRP.get_newest_update(sv))
+                    update=MC.get_newest_update(sv))
         else:
-            si = In(variable=MRP.get_newest(sv),
+            si = In(variable=MC.get_newest(sv),
                     value=sv.container,
                     mutable=False,
                     borrow=True)

@@ -546,15 +546,15 @@ class Test_pfunc(unittest.TestCase):
 
 
     def test_default_updates_input(self):
-        x = shared(0)
-        y = shared(1)
-        if theano.gof.cmodule.local_bitwidth()==32:
+        x = shared(0, 'x')
+        y = shared(1, 'y')
+        if theano.gof.cmodule.local_bitwidth() == 32:
             a = iscalar('a')
         else:
             a = lscalar('a')
 
         x.default_update = y
-        y.default_update = y+a
+        y.default_update = y + a
 
         f1 = pfunc([], x, no_default_updates=True)
         f1()
@@ -568,18 +568,20 @@ class Test_pfunc(unittest.TestCase):
 
         f3 = pfunc([], x, no_default_updates=[y])
         f3()
-        assert x.get_value() == 1
-        assert y.get_value() == 1
+        assert x.get_value() == 1, x.get_value()
+        assert y.get_value() == 1, y.get_value()
 
         f4 = pfunc([a], x)
         f4(2)
         assert x.get_value() == 1
         assert y.get_value() == 3
 
-        f5 = pfunc([], x, updates={y:y-1})
-        f5()
-        assert x.get_value() == 3
-        assert y.get_value() == 2
+        f5 = pfunc([], x, updates={y: y - 1})
+        #theano.printing.debugprint(f5)
+        rval = f5()
+        assert rval == 1, rval
+        assert x.get_value() == 3, x.get_value()
+        assert y.get_value() == 2, y.get_value()
 
         # a is needed as input if y.default_update is used
         self.assertRaises(TypeError, pfunc, [], x)

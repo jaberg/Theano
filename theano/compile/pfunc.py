@@ -148,9 +148,11 @@ class MergeClone(object):
 
         if self.clone_inputs:
             self._clone_d[v] = v.clone()
+            cv = self._clone_d[v]
         else:
-            self._clone_d[v] = v
-        self.shared_inputs.append((v, self._clone_d[v]))
+            cv = v
+        self._clone_d[cv] = cv
+        self.shared_inputs.append((v, cv))
 
         if v not in self.updates_d:
             if (self.add_default_update(v)
@@ -159,6 +161,8 @@ class MergeClone(object):
                 if orig_update_expr is not None:
                     self.updates_d[v] = orig_update_expr
                     self.updates.append((v, orig_update_expr))
+                print 'adding update'
+                printing.debugprint(orig_update_expr)
 
     def sort_replace_pairs(self):
         """
@@ -210,8 +214,12 @@ class MergeClone(object):
             elif isinstance(v, Constant) and hasattr(v,'env'):
                 # N.B. cloning constants does not copy the underlying object
                 self._clone_d[v] = v.clone()
+                v = self._clone_d[v]
+                self._clone_d[v] = v
             elif self.clone_inputs:
                 self._clone_d[v] = v.clone()
+                v = self._clone_d[v]
+                self._clone_d[v] = v
             else:
                 self._clone_d[v] = v
         return self.get_newest(v)

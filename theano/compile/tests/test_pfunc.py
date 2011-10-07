@@ -16,6 +16,21 @@ def data_of(s):
     """Return the raw value of a shared variable"""
     return s.container.storage[0]
 
+class TestMergeClone(unittest.TestCase):
+    def test_no_replace_input(self):
+        a, b, c = tensor.scalars('abc')
+        self.assertRaises(ValueError,
+                MergeClone, [a, b], [a * b], [(a, c)], [])
+
+    def test_replace_makes_cycle(self):
+        a, b, c = tensor.scalars('abc')
+        c = a + b
+        d = c + b
+        # replacement should create a cycle
+        MC = MergeClone([a, b], [d], [(c, d+b)], [])
+        self.assertRaises(ValueError, MC.merge_all)
+
+
 
 class Test_pfunc(unittest.TestCase):
 

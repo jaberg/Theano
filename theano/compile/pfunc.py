@@ -35,6 +35,9 @@ class MergeClone(object):
             rebuild_strict = True,
             clone_inputs = True,
             add_default_update = lambda var: True):
+        for (old, new) in replace_pairs:
+            if old in inputs:
+                raise ValueError('replacing input is ambiguous')
         self._clone_d = {}         # old -> new mapping for merged output graph
         self.shared_inputs = []    # cloned shared variables in discovery order
         self.orig_inputs = inputs
@@ -48,11 +51,21 @@ class MergeClone(object):
         self.rebuild_strict = rebuild_strict
         self.add_default_update = add_default_update
 
+    def has_cycles(self):
+        newest_updates = [self.get_newest(repl)
+                for (old, repl) in self.updates]
+        print graph.io_toposort(self.built_inputs,
+                self.built_outputs + newest_updates)
+
     def merge_all(self):
         self.merge_givens()
+        print self._clone_d
         self.merge_inputs()
         self.merge_outputs()
         self.merge_update_expressions()
+        print self.has_cycles()
+        #if self.has_cycles():
+            #raise ValueError('Merged graph contains cycles')
 
     def merge_givens(self):
         """
@@ -176,7 +189,8 @@ class MergeClone(object):
         co-dependent.
 
         """
-        # Suppose we're replacing vars v1 and v2, but v2 appears in the ancestors of v1.
+        # Suppose we're replacing vars v1 and v2,
+        # but v2 appears in the ancestors of v1.
         # In this case we have to replace v2 first, and then v1.
         v_orig_ancestors = {}
         v_origs_set = set([v_orig for (v_orig, v_repl) in self.replace_pairs])

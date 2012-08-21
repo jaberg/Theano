@@ -611,8 +611,8 @@ def grad(cost, wrt, g_cost=None, consider_constant=None, warn_type=False,
     # new_vars is meant to be a list of all variables created
     # by this call to grad(), which will be visible to the caller
     # after we return.
-    new_vars = graph.ancestors(ret,
-            blockers=graph.ancestors(cost) + list(wrt))
+    new_vars = gof.graph.ancestors(ret,
+            blockers=gof.graph.ancestors(cost) + list(wrt))
     map(raise_if_bad_grad, [v.owner for v in new_vars])
 
     return format_as(using_list, using_tuple, ret)

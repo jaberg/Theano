@@ -149,8 +149,6 @@ def std_fgraph(input_specs, output_specs, accept_inplace = False):
 
 
 std_fgraph.features = []
-std_fgraph.features.append(gof.toolbox.PreserveNames)
-std_fgraph.features.append(theano.gradient.BadGradFeature)
 
 
 class AliasedMemoryError(Exception):

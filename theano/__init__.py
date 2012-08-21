@@ -164,3 +164,7 @@ def dot(l, r):
         raise NotImplementedError("Dot failed for the following reasons:",
                                   (e0, e1))
     return rval
+
+
+compile.function_module.std_fgraph.features.append(gof.toolbox.PreserveNames)
+compile.function_module.std_fgraph.features.append(gradient.BadGradFeature)

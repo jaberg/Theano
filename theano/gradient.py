@@ -288,8 +288,6 @@ class BadGradFeature(gof.Feature):
     def on_import(self, fgraph, node):
         raise_if_bad_grad(node)
 
-theano.compile.function_module.std_fgraph.features.append(BadGradFeature)
-
 
 ########################
 # R Operator

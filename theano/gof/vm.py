@@ -3,6 +3,7 @@ VMs that run Theano graph computations.
 A VM is not actually different from a Linker, we just decided
 VM was a better name at some point
 """
+import atexit
 import link
 import logging
 import sys

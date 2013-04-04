@@ -1800,8 +1800,15 @@ class _tensor_py_operators:
                 rval = view.__getitem__(tuple(new_args))
                 return rval
             else:
-                return Subtensor(args)(self, *Subtensor.collapse(args,
-                    lambda entry: isinstance(entry, Variable)))
+                def cond(entry):
+                    if isinstance(entry, Constant):
+                        try:
+                            entry = int(get_scalar_constant_value(entry))
+                            return False
+                        except NotScalarConstantError:
+                            pass
+                    return isinstance(entry, Variable)
+                return Subtensor(args)(self, *Subtensor.collapse(args, cond))
 
     def take(self, indices, axis=None, mode='raise'):
         return take(self, indices, axis, mode)
@@ -4415,12 +4422,18 @@ class Subtensor(Op):
                      or entry.type in invalid_tensor_types)):
             raise TypeError("Expected an integer")
 
-        if isinstance(entry, gof.Variable) and entry.type in scal_types:
+        if isinstance(entry, gof.Constant):
+            try:
+                entry = int(get_scalar_constant_value(entry))
+                print entry, type(entry)
+            except NotScalarConstantError:
+                pass
+
+        elif isinstance(entry, gof.Variable) and entry.type in scal_types:
             return entry.type
         elif isinstance(entry, gof.Type) and entry in scal_types:
             return entry
-
-        if (isinstance(entry, gof.Variable)
+        elif (isinstance(entry, gof.Variable)
                 and entry.type in tensor_types
                 and numpy.all(entry.type.broadcastable)):
             return scal.Scalar(entry.type.dtype)

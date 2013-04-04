@@ -552,9 +552,6 @@ class ProfileStats(object):
                         self.linker_time)
         print >> file, ''
 
-        # The validation time is a subset of optimizer_time
-        assert self.validate_time < self.optimizer_time
-
     def summary(self, file=sys.stderr, n_ops_to_print=20,
                 n_applies_to_print=20):
         self.summary_function(file)

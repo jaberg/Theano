@@ -53,6 +53,9 @@ class Hint(Op):
     def grad(self, inputs, g_out):
         return g_out
 
+    def infer_shape(self, node, shapes):
+        return [shapes[0]]
+
 
 def is_hint_node(node):
     return isinstance(node.op, Hint)

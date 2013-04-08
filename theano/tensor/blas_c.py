@@ -604,22 +604,25 @@ def make_c_gemv_destructive(node):
 # Optimizers
 ####### ####### #######
 
-blas_optdb.register('use_c_blas',
-    EquilibriumOptimizer([
+opt_use_c_blas = EquilibriumOptimizer([
         use_c_ger,
         use_c_gemv,
         ],
-        max_use_ratio=5),
+        max_use_ratio=5)
+blas_optdb.register('use_c_blas',
+    opt_use_c_blas,
     20, 'fast_run', 'c_blas')
 #print 'BLAS_OPTDB'
 #print blas_optdb
 
 # this matches the InplaceBlasOpt defined in blas.py
+opt_c_blas_destructive = EquilibriumOptimizer(
+    [
+        make_c_ger_destructive,
+        make_c_gemv_destructive,
+    ],
+    failure_callback=EquilibriumOptimizer.warn_inplace,
+    max_use_ratio=5)
 optdb.register('c_blas_destructive',
-        EquilibriumOptimizer([
-                make_c_ger_destructive,
-                make_c_gemv_destructive,
-            ],
-            failure_callback=EquilibriumOptimizer.warn_inplace,
-            max_use_ratio=5),
+        opt_c_blas_destructive,
         70.0, 'fast_run', 'inplace', 'c_blas')

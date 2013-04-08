@@ -674,6 +674,9 @@ class specific_out(gof.utils.object2):
     def __hash__(self):
         return hash(self.spec)
 
+    def __str__(self):
+        return '<theano.scalar.basic.specific_out{%s}>' % self.spec
+
 
 def int_out(*types):
     return int64,

@@ -1336,6 +1336,28 @@ CudaNdarray_add(PyObject* py_self, PyObject * py_other)
 }
 
 template <int operator_num>
+__global__ void k_ielem_1(const int d0,
+        float* a, const int sA0,
+        const float* b, const int sB0){
+    for (int i0 = blockIdx.x * blockDim.x + threadIdx.x;
+            i0 < d0; i0 += gridDim.x * blockDim.x)
+    {
+                switch (operator_num)
+                {
+                  case IADD:
+                    a[i0*sA0] += b[i0*sB0];
+                    break;
+                  case IDIV:
+                    a[i0*sA0] /= b[i0*sB0];
+                    break;
+                  case CPY:
+                    a[i0*sA0] = b[i0*sB0];
+                    break;
+                }
+    }
+}
+
+template <int operator_num>
 __global__ void k_ielem_3(const int d0, const int d1, const int d2,
         float* a, const int sA0, const int sA1, const int sA2,
         const float* b, const int sB0, const int sB1, const int sB2){
@@ -1407,6 +1429,9 @@ int
 CudaNdarray_inplace_elemwise(PyObject* py_self, PyObject * py_other, operator_t fct_nb)
 {
     int verbose = 0;
+    void (*k1)(const int,
+                    float*, const int,
+                    const float*, const int);
     void (*k3)(const int, const int, const int,
                     float*, const int, const int, const int,
                     const float*, const int, const int, const int);
@@ -1418,14 +1443,17 @@ CudaNdarray_inplace_elemwise(PyObject* py_self, PyObject * py_other, operator_t 
     switch (fct_nb)
     {
         case IADD:
+            k1 = k_ielem_1<IADD>;
             k3 = k_ielem_3<IADD>;
             k4 = k_ielem_4<IADD>;
             break;
         case IDIV:
+            k1 = k_ielem_1<IDIV>;
             k3 = k_ielem_3<IDIV>;
             k4 = k_ielem_4<IDIV>;
             break;
         case CPY:
+            k1 = k_ielem_1<CPY>;
             k3 = k_ielem_3<CPY>;
             k4 = k_ielem_4<CPY>;
             break;
@@ -1567,22 +1595,16 @@ CudaNdarray_inplace_elemwise(PyObject* py_self, PyObject * py_other, operator_t 
             break;
         case 1:
             {
-                dim3 n_blocks(1, 1, 1);
                 dim3 n_threads(
                         std::min(
                             CudaNdarray_HOST_DIMS(self)[0],
                             NUM_VECTOR_OP_THREADS_PER_BLOCK));
-                k3<<<n_blocks, n_threads>>>(
-                        1, //dimensions
-                        1,
-                        CudaNdarray_HOST_DIMS(self)[0],
+                // XXX: don't try for too many blocks
+                dim3 n_blocks(CudaNdarray_HOST_DIMS(self)[0] / n_threads.x + 1);
+                k1<<<n_blocks, n_threads>>>(CudaNdarray_HOST_DIMS(self)[0],
                         CudaNdarray_DEV_DATA(self),
-                        1, //strides
-                        1,
                         CudaNdarray_HOST_STRIDES(self)[0],
                         CudaNdarray_DEV_DATA(other),
-                        1, //strides
-                        1,
                         other_strides[0]);
                 CNDA_THREAD_SYNC;
                 cudaError_t err = cudaGetLastError();
@@ -1591,7 +1613,7 @@ CudaNdarray_inplace_elemwise(PyObject* py_self, PyObject * py_other, operator_t 
                     PyErr_Format(
                         PyExc_RuntimeError,
                         "Cuda error: %s: %s.\n",
-                        "k3",
+                        "k1",
                         cudaGetErrorString(err));
                     Py_XDECREF(new_other);
                     return -1;
